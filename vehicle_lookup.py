@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Firewall Breaker - Vehicle Info 
-# Created by: thakur2309
-# YouTube: Firewall Breaker
+# Created by: Gunja Rahul
+# YouTube: Gunja Rahul
 
 """
 DISCLAIMER:
@@ -73,7 +73,7 @@ def loading_animation():
 def banner():
     console.rule()
     console.print(Align.center(f"[bold red]FIREWALL BREAKER[/bold red]  •  [yellow]{VERSION}[/yellow]"))
-    console.print(Align.center("[green]Created by: thakur2309 • YouTube: Firewall Breaker[/green]"))
+    console.print(Align.center("[green]Created by: G.Rahul • YouTube: Gunja Rahul[/green]"))
     console.rule()
     console.print(
         Panel(
@@ -102,7 +102,7 @@ def fetch_vehicle_data(rc):
         resp = requests.get(
             url,
             timeout=15,
-            headers={"User-Agent": "FirewallBreaker/PRO (by thakur2309)"},
+            headers={"User-Agent": "FirewallBreaker/PRO (by G.Rahul)"},
         )
     except Exception as e:
         return {"error": str(e)}, False
@@ -127,7 +127,7 @@ def export_json(rc, data):
         json.dump(data, f, indent=4)
 
 def print_results(rc, data, from_cache):
-    tool_info = f"[bold magenta]Firewall Breaker PRO[/bold magenta]  •  [bold magenta]by thakur2309[/bold magenta]"
+    tool_info = f"[bold magenta]Firewall Breaker PRO[/bold magenta]  •  [bold magenta]by G.Rahul[/bold magenta]"
     console.print(Panel(tool_info, style="magenta", expand=False))
 
     if "error" in data:
@@ -167,7 +167,7 @@ def print_results(rc, data, from_cache):
     console.print(
         Panel(
             Align.center(
-                "Made with ♥ by Firewall Breaker\nYouTube: Firewall Breaker",
+                "Made with ♥ by Firewall Breaker\nYouTube: Gunja Rahul",
                 vertical="middle",
             ),
             style="blue",
