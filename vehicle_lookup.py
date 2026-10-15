@@ -1,273 +1,157 @@
-#!/usr/bin/env python3
 
+#!/usr/bin/env python3
 # ============================================================
 # FIREWALL BREAKER - VEHICLE INFO
 # Created by: Gunja Rahul
 # YouTube: Gunja Rahul
-# Version: 2.0 PRO
+# Version: 2.1 PRO
 # ============================================================
-
-"""
-DISCLAIMER:
-This tool is for lawful, educational and authorized use only.
-
-Only query vehicle information when you have a legitimate reason
-and are authorized to access the data. Do not use this tool for
-unauthorized tracking, surveillance, harassment, or privacy abuse.
-"""
 
 import sys
 import os
 import json
 import time
-import hashlib
 import re
-import requests
-
+import hashlib
+import argparse
+from datetime import datetime, timezone
 from urllib.parse import urlencode
-from datetime import datetime
 
+import requests
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
 from rich.align import Align
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 API_BASE = "https://vehicleinfobyterabaap.vercel.app/lookup"
-VERSION = "2.0 PRO"
-
-console = Console()
-
-
-# ============================================================
-# DIRECTORIES
-# ============================================================
+VERSION = "2.1 PRO"
+CACHE_TTL = 3600
+TIMEOUT = 20
 
 RESULTS_DIR = "results"
 LOGS_DIR = "logs"
 CACHE_DIR = "cache"
 
+console = Console()
+
 
 def ensure_dirs():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    for directory in (RESULTS_DIR, LOGS_DIR, CACHE_DIR):
+        os.makedirs(directory, exist_ok=True)
 
-
-# ============================================================
-# SCREEN
-# ============================================================
 
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def slow_print(text, delay=0.02):
-    for char in text:
-        print(char, end="", flush=True)
-        time.sleep(delay)
-    print()
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
 def log(message):
+    """Log operational events without logging registration numbers."""
     try:
-        with open(
-            os.path.join(LOGS_DIR, "firewall.log"),
-            "a",
-            encoding="utf-8"
-        ) as file:
-
-            file.write(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"{message}\n"
-            )
-
-    except Exception:
+        path = os.path.join(LOGS_DIR, "firewall.log")
+        timestamp = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        with open(path, "a", encoding="utf-8") as file:
+            file.write(f"[{timestamp}] {message}\n")
+    except OSError:
         pass
 
 
-# ============================================================
-# RC NUMBER
-# ============================================================
-
 def normalize_rc(rc):
-    """
-    Convert an RC number to a consistent format.
-
-    Example:
-        TS 05 ED 5022
-        ts05ed5022
-
-    becomes:
-
-        TS05ED5022
-    """
-
-    if not rc:
-        return ""
-
-    rc = rc.strip().upper()
-
-    # Remove spaces, hyphens and other separators
-    rc = re.sub(r"[\s\-]", "", rc)
-
-    return rc
+    """Normalize spaces and hyphens in a registration number."""
+    return re.sub(r"[\s-]+", "", (rc or "").strip().upper())
 
 
 def validate_rc(rc):
-    """
-    Basic Indian vehicle registration validation.
-
-    This is intentionally not overly strict because different
-    registration formats can exist.
-    """
-
-    if not rc:
-        return False
-
-    if len(rc) < 6 or len(rc) > 15:
-        return False
-
-    if not re.match(r"^[A-Z0-9]+$", rc):
-        return False
-
-    return True
+    """Basic format validation, not proof of a valid registration."""
+    return bool(
+        rc
+        and 6 <= len(rc) <= 15
+        and re.fullmatch(r"[A-Z0-9]+", rc)
+        and re.search(r"[A-Z]", rc)
+        and re.search(r"\d", rc)
+    )
 
 
 def get_rc_input():
-
-    console.print(
-        "\n[bold cyan]Enter Vehicle RC number:[/bold cyan] ",
-        end=""
+    return normalize_rc(
+        console.input(
+            "\n[bold cyan]Enter vehicle RC number: [/bold cyan]"
+        )
     )
 
-    rc = input().strip()
-
-    rc = normalize_rc(rc)
-
-    if not validate_rc(rc):
-
-        console.print(
-            "\n[bold red]Invalid RC format.[/bold red]"
-        )
-
-        console.print(
-            "[yellow]Example:[/yellow] TS05ED5022\n"
-        )
-
-        return None
-
-    return rc
-
-
-# ============================================================
-# CACHE
-# ============================================================
 
 def cache_path(rc):
-
-    rc_hash = hashlib.sha256(
-        rc.encode("utf-8")
-    ).hexdigest()
-
-    return os.path.join(
-        CACHE_DIR,
-        f"{rc_hash}.json"
-    )
-
-
-def save_cache(rc, data):
-
-    try:
-
-        with open(
-            cache_path(rc),
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                indent=4,
-                ensure_ascii=False
-            )
-
-    except Exception as error:
-
-        log(f"Cache save failed: {error}")
+    # Hash the filename so the registration is not visible in the path.
+    digest = hashlib.sha256(rc.encode("utf-8")).hexdigest()
+    return os.path.join(CACHE_DIR, f"{digest}.json")
 
 
 def load_cache(rc):
-
     path = cache_path(rc)
 
-    if not os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            entry = json.load(file)
+
+        if not isinstance(entry, dict):
+            return None
+
+        saved_at = entry.get("_cached_at")
+        data = entry.get("data")
+
+        if not isinstance(saved_at, (int, float)):
+            return None
+
+        if time.time() - saved_at > CACHE_TTL:
+            return None
+
+        if not isinstance(data, dict) or "error" in data:
+            return None
+
+        return data
+
+    except (OSError, ValueError, TypeError):
         return None
+
+
+def save_cache(rc, data):
+    if not isinstance(data, dict) or "error" in data:
+        return
+
+    path = cache_path(rc)
+    temporary_path = path + ".tmp"
 
     try:
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "_cached_at": time.time(),
+                    "data": data,
+                },
+                file,
+                indent=2,
+                ensure_ascii=False,
+            )
 
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as file:
+        os.replace(temporary_path, path)
 
-            return json.load(file)
-
-    except Exception as error:
-
-        log(f"Cache load failed: {error}")
-
-        return None
-
-
-# ============================================================
-# BANNER
-# ============================================================
-
-def loading_animation():
-
-    console.print(
-        "\n[bold green]Initializing Firewall Breaker...[/bold green]\n"
-    )
-
-    steps = [
-        "Booting modules",
-        "Checking network",
-        "Loading UI",
-        "Starting engine"
-    ]
-
-    for step in steps:
-
-        console.print(
-            f"[bold cyan]>> {step}...[/bold cyan]"
-        )
-
-        time.sleep(0.25)
-
-    time.sleep(0.3)
+    except (OSError, TypeError, ValueError) as error:
+        log(f"Cache save failed: {type(error).__name__}")
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
 
 
 def banner():
-
     console.rule()
 
     console.print(
         Align.center(
             f"[bold red]FIREWALL BREAKER[/bold red]"
-            f"  •  "
-            f"[yellow]{VERSION}[/yellow]"
+            f" • [yellow]{VERSION}[/yellow]"
         )
     )
 
@@ -279,558 +163,243 @@ def banner():
 
     console.rule()
 
-    disclaimer = (
-        "[bold white on red] DISCLAIMER [/bold white on red]\n"
-        "This tool is for lawful, educational and authorized use only."
-    )
-
     console.print(
         Panel(
-            disclaimer,
-            style="red",
-            expand=False
+            "[bold white]Authorized vehicle-information lookups only[/bold white]\n"
+            "Use a legitimate data source and respect privacy.",
+            border_style="yellow",
+            expand=False,
         )
     )
 
-    console.rule()
 
+def fetch_vehicle_data(rc, refresh=False):
+    if not refresh:
+        cached = load_cache(rc)
+        if cached is not None:
+            return cached, True
 
-# ============================================================
-# API REQUEST
-# ============================================================
-
-def fetch_vehicle_data(rc):
-
-    # --------------------------------------------------------
-    # Check cache first
-    # --------------------------------------------------------
-
-    cached = load_cache(rc)
-
-    if cached:
-
-        cached["_from_cache"] = True
-
-        return cached, True
-
-
-    # --------------------------------------------------------
-    # Build API URL
-    # --------------------------------------------------------
-
-    params = {
-        "rc": rc
-    }
-
-    url = f"{API_BASE}?{urlencode(params)}"
-
-    start_time = time.time()
-
-    log(
-        f"Query started. RC length={len(rc)}"
-    )
-
-
-    # --------------------------------------------------------
-    # HTTP REQUEST
-    # --------------------------------------------------------
+    start = time.monotonic()
+    log("Vehicle lookup started")
 
     try:
-
         response = requests.get(
-            url,
-            timeout=20,
+            API_BASE,
+            params={"rc": rc},
+            timeout=TIMEOUT,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "(X11; Linux x86_64) "
-                    "AppleWebKit/537.36 "
-                    "Chrome/140 Safari/537.36"
-                ),
                 "Accept": "application/json",
-            }
+                "User-Agent": "FirewallBreaker/2.1",
+            },
         )
 
     except requests.exceptions.Timeout:
-
         return {
-            "error": "API request timed out.",
-            "_status": "TIMEOUT"
+            "error": "The API request timed out.",
+            "_status": "TIMEOUT",
         }, False
 
     except requests.exceptions.ConnectionError:
-
         return {
-            "error": (
-                "Could not connect to the vehicle API. "
-                "Check your internet connection or API server."
-            ),
-            "_status": "CONNECTION_ERROR"
+            "error": "Connection failed. Check your internet and API availability.",
+            "_status": "CONNECTION_ERROR",
         }, False
 
     except requests.exceptions.RequestException as error:
-
+        log(f"Request failed: {type(error).__name__}")
         return {
-            "error": f"Request failed: {error}",
-            "_status": "REQUEST_ERROR"
+            "error": "The HTTP request failed.",
+            "_status": "REQUEST_ERROR",
         }, False
 
+    elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+    status = response.status_code
 
-    # --------------------------------------------------------
-    # RESPONSE TIME
-    # --------------------------------------------------------
+    if status != 200:
+        messages = {
+            400: "The API rejected the request.",
+            401: "The API requires authentication.",
+            403: "The API denied access.",
+            404: "No record was returned, or the endpoint was not found.",
+            429: "Rate limit reached. Try again later.",
+        }
 
-    response_time = round(
-        (time.time() - start_time) * 1000,
-        2
-    )
-
-
-    # --------------------------------------------------------
-    # HTTP 404
-    # --------------------------------------------------------
-
-    if response.status_code == 404:
-
-        try:
-            error_data = response.json()
-
-            message = error_data.get(
-                "error",
-                "No vehicle data found for this RC number."
+        if status >= 500:
+            message = "The API server encountered an error."
+        else:
+            message = messages.get(
+                status, f"Unexpected HTTP status: {status}"
             )
 
-        except ValueError:
-
-            message = (
-                "No vehicle data found for this RC number."
-            )
-
-        log(
-            f"API returned 404. Response time={response_time}ms"
-        )
+        log(f"Lookup failed: HTTP {status}")
 
         return {
             "error": message,
-            "_status": 404,
-            "_api_time": response_time
+            "_status": status,
+            "_api_time": elapsed_ms,
         }, False
-
-
-    # --------------------------------------------------------
-    # HTTP 429
-    # --------------------------------------------------------
-
-    if response.status_code == 429:
-
-        log("API rate limit reached.")
-
-        return {
-            "error": (
-                "API rate limit reached. "
-                "Please try again later."
-            ),
-            "_status": 429,
-            "_api_time": response_time
-        }, False
-
-
-    # --------------------------------------------------------
-    # HTTP 500+
-    # --------------------------------------------------------
-
-    if response.status_code >= 500:
-
-        log(
-            f"API server error: HTTP {response.status_code}"
-        )
-
-        return {
-            "error": (
-                f"Vehicle API server error: "
-                f"HTTP {response.status_code}"
-            ),
-            "_status": response.status_code,
-            "_api_time": response_time
-        }, False
-
-
-    # --------------------------------------------------------
-    # Other HTTP errors
-    # --------------------------------------------------------
-
-    if response.status_code != 200:
-
-        try:
-            error_body = response.text[:500]
-        except Exception:
-            error_body = "No response body."
-
-        return {
-            "error": (
-                f"API returned HTTP "
-                f"{response.status_code}: "
-                f"{error_body}"
-            ),
-            "_status": response.status_code,
-            "_api_time": response_time
-        }, False
-
-
-    # --------------------------------------------------------
-    # JSON RESPONSE
-    # --------------------------------------------------------
 
     try:
-
         data = response.json()
-
     except ValueError:
-
         return {
-            "error": (
-                "API returned an invalid JSON response."
-            ),
-            "_status": 200,
-            "_api_time": response_time
+            "error": "The API returned invalid JSON.",
+            "_status": status,
+            "_api_time": elapsed_ms,
         }, False
 
+    if not isinstance(data, dict):
+        data = {"vehicle_data": data}
 
-    # --------------------------------------------------------
-    # Add metadata
-    # --------------------------------------------------------
+    if "error" in data:
+        return {
+            "error": str(data["error"]),
+            "_status": status,
+            "_api_time": elapsed_ms,
+        }, False
 
-    if isinstance(data, dict):
-
-        data["_api_time"] = response_time
-
-        data["_status"] = 200
-
-    else:
-
-        data = {
-            "vehicle_data": data,
-            "_api_time": response_time,
-            "_status": 200
-        }
-
-
-    # --------------------------------------------------------
-    # Save cache
-    # --------------------------------------------------------
+    data["_status"] = status
+    data["_api_time"] = elapsed_ms
 
     save_cache(rc, data)
-
-    log(
-        f"API success. Response time={response_time}ms"
-    )
+    log("Lookup completed")
 
     return data, False
 
 
-# ============================================================
-# EXPORT
-# ============================================================
-
 def export_json(rc, data):
-
-    path = os.path.join(
-        RESULTS_DIR,
-        f"{rc}.json"
-    )
+    # The validated RC contains only letters and digits.
+    path = os.path.join(RESULTS_DIR, f"{rc}.json")
+    temporary_path = path + ".tmp"
 
     try:
-
-        with open(
-            path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
+        with open(temporary_path, "w", encoding="utf-8") as file:
             json.dump(
                 data,
                 file,
-                indent=4,
-                ensure_ascii=False
+                indent=2,
+                ensure_ascii=False,
             )
 
+        os.replace(temporary_path, path)
         return path
 
-    except Exception as error:
+    except (OSError, TypeError, ValueError) as error:
+        log(f"Export failed: {type(error).__name__}")
 
-        log(f"Export failed: {error}")
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
 
         return None
 
 
-# ============================================================
-# RESULTS
-# ============================================================
-
 def print_results(rc, data, from_cache):
-
-    console.print(
-        Panel(
-            "[bold magenta]Firewall Breaker PRO[/bold magenta]"
-            "  •  "
-            "[bold magenta]by G.Rahul[/bold magenta]",
-            style="magenta",
-            expand=False
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Error
-    # --------------------------------------------------------
-
     if "error" in data:
-
-        status = data.get("_status", "ERROR")
-
-        api_time = data.get(
-            "_api_time",
-            "N/A"
-        )
-
         console.print(
             Panel(
-                f"[bold red]Error:[/bold red]\n"
-                f"{data['error']}\n\n"
-                f"[yellow]HTTP Status:[/yellow] {status}\n"
-                f"[yellow]Response Time:[/yellow] "
-                f"{api_time} ms",
-                style="red"
+                f"[bold red]{data['error']}[/bold red]\n\n"
+                f"Status: {data.get('_status', 'ERROR')}\n"
+                f"Response time: {data.get('_api_time', 'N/A')} ms",
+                title="Lookup Failed",
+                border_style="red",
             )
         )
-
         return
-
-
-    # --------------------------------------------------------
-    # API STATUS
-    # --------------------------------------------------------
-
-    api_time = data.get(
-        "_api_time",
-        "N/A"
-    )
-
-    status_code = data.get(
-        "_status",
-        200
-    )
 
     console.print(
         Panel(
-            f"[bold green]API: OK[/bold green]\n"
-            f"HTTP Status: {status_code}\n"
+            f"[green]HTTP Status: {data.get('_status', 'N/A')}[/green]\n"
             f"Cached: {'YES' if from_cache else 'NO'}\n"
-            f"Response Time: {api_time} ms",
-            style="green",
-            expand=False
+            f"Response time: {data.get('_api_time', 'N/A')} ms",
+            title="API Status",
+            border_style="green",
         )
     )
-
-
-    # --------------------------------------------------------
-    # Vehicle information table
-    # --------------------------------------------------------
 
     table = Table(
         title=f"Vehicle Information — {rc}",
         box=box.ROUNDED,
-        show_lines=True
+        show_lines=True,
     )
 
-    table.add_column(
-        "Field",
-        style="bold cyan",
-        no_wrap=True
-    )
-
-    table.add_column(
-        "Value",
-        style="white"
-    )
-
+    table.add_column("Field", style="bold cyan")
+    table.add_column("Value", overflow="fold")
 
     for key, value in data.items():
-
-        # Don't display internal metadata
         if key.startswith("_"):
             continue
 
         if isinstance(value, (dict, list)):
-
             value = json.dumps(
                 value,
                 indent=2,
-                ensure_ascii=False
+                ensure_ascii=False,
             )
 
-        table.add_row(
-            str(key)
-            .replace("_", " ")
-            .title(),
-
-            str(value)
-        )
-
+        table.add_row(str(key).replace("_", " ").title(), str(value))
 
     console.print(table)
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
+    parser = argparse.ArgumentParser(
+        description="Firewall Breaker PRO — authorized vehicle lookup"
+    )
+    parser.add_argument(
+        "--rc",
+        help="Vehicle registration number, e.g. TS05ED5022",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Skip the cache and query the API again",
+    )
+    args = parser.parse_args()
 
     ensure_dirs()
-
     clear_screen()
-
-    loading_animation()
-
     banner()
 
-
-    # --------------------------------------------------------
-    # Command-line RC
-    # --------------------------------------------------------
-
-    if (
-        len(sys.argv) > 1
-        and sys.argv[1].startswith("--rc=")
-    ):
-
-        rc = sys.argv[1].replace(
-            "--rc=",
-            "",
-            1
-        )
-
-        rc = normalize_rc(rc)
-
-    else:
-
-        rc = get_rc_input()
-
-
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
-
-    if not rc:
-
-        console.print(
-            "\n[bold red]No valid RC entered.[/bold red]"
-        )
-
-        sys.exit(1)
-
+    rc = normalize_rc(args.rc) if args.rc else get_rc_input()
 
     if not validate_rc(rc):
-
         console.print(
-            "\n[bold red]Invalid RC number.[/bold red]"
+            "[bold red]Invalid registration format.[/bold red]\n"
+            "[yellow]Example: TS05ED5022[/yellow]"
         )
-
-        console.print(
-            "[yellow]Example:[/yellow] TS05ED5022"
-        )
-
         sys.exit(1)
 
+    console.print(f"\n[cyan]Searching:[/cyan] [bold green]{rc}[/bold green]")
 
-    # --------------------------------------------------------
-    # Query
-    # --------------------------------------------------------
-
-    console.print(
-        f"\n[bold cyan]Searching:[/bold cyan] "
-        f"[bold green]{rc}[/bold green]\n"
-    )
-
-
-    data, from_cache = fetch_vehicle_data(rc)
-
-
-    # --------------------------------------------------------
-    # Display
-    # --------------------------------------------------------
-
-    print_results(
+    data, from_cache = fetch_vehicle_data(
         rc,
-        data,
-        from_cache
+        refresh=args.refresh,
     )
 
-
-    # --------------------------------------------------------
-    # Export successful results
-    # --------------------------------------------------------
+    print_results(rc, data, from_cache)
 
     if "error" not in data:
-
-        output_file = export_json(
-            rc,
-            data
-        )
+        output_file = export_json(rc, data)
 
         if output_file:
-
             console.print(
-                "\n[bold yellow]"
-                f"Result saved: {output_file}"
-                "[/bold yellow]"
+                f"\n[bold yellow]Saved result: {output_file}[/bold yellow]"
             )
 
-            log(
-                "Result exported successfully."
-            )
+    console.print("\n[bold green]Done.[/bold green]")
 
-
-    # --------------------------------------------------------
-    # Finish
-    # --------------------------------------------------------
-
-    console.print(
-        "\n[bold green]Done.[/bold green]"
-    )
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     try:
-
         main()
-
     except KeyboardInterrupt:
-
-        console.print(
-            "\n[bold red]"
-            "Interrupted by user — exiting."
-            "[/bold red]"
-        )
-
-        sys.exit(0)
-
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        sys.exit(130)
     except Exception as error:
-
+        log(f"Unexpected error: {type(error).__name__}")
         console.print(
-            "\n[bold red]"
-            f"Unexpected error: {error}"
-            "[/bold red]"
+            f"\n[bold red]Unexpected error: {type(error).__name__}[/bold red]"
         )
-
-        log(
-            f"Unexpected error: {error}"
-        )
-
         sys.exit(1)
